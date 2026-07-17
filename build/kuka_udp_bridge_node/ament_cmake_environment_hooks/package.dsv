@@ -1,4 +1,0 @@
-source;share/kuka_udp_bridge_node/local_setup.bash
-source;share/kuka_udp_bridge_node/local_setup.dsv
-source;share/kuka_udp_bridge_node/local_setup.sh
-source;share/kuka_udp_bridge_node/local_setup.zsh

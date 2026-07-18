@@ -17,8 +17,8 @@ import com.kuka.roboticsAPI.motionModel.kmp.MobilePlatformRelativeMotion;
 import com.kuka.task.ITaskLogger;
 
 public class UDP_bridge extends RoboticsAPIApplication {
-    @Inject private Controller kukaController;
-    @Inject private LBR lbr;
+    //@Inject private Controller kukaController;
+    //@Inject private LBR lbr;
     @Inject private KmpOmniMove kmp;
     @Inject private ITaskLogger logger; 
     
@@ -60,8 +60,8 @@ public class UDP_bridge extends RoboticsAPIApplication {
     public void initialize() {
         try {
             udpSocket = new DatagramSocket(PORT_ROBOT);
-            udpSocket.setSoTimeout(10); 
-            ros2Address = null; 
+            //udpSocket.setSoTimeout(10); 
+            ros2Address = null; 	
             
             motionExecutor = Executors.newSingleThreadExecutor();
 

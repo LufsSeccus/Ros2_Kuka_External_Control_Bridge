@@ -23,14 +23,14 @@
 #include "tf2_ros/transform_broadcaster.h"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "tf2/LinearMath/Matrix3x3.h"
-#include "sensor_msgs/msg/joint_state.hpp" // Added for LBR Arm Control
+#include "sensor_msgs/msg/joint_state.hpp"
 
 using namespace std::chrono_literals;
 
 class KukaUdpBridge : public rclcpp::Node {
 public:
     KukaUdpBridge() : Node("kuka_udp_bridge"), tx_counter_(0) {
-        // 1. Declare ROS2 Parameters
+        // 1. Declare Parameters
         this->declare_parameter<std::string>("robot_ip", "172.31.1.147");
         this->declare_parameter<int>("robot_port", 30300);
         this->declare_parameter<int>("client_port", 30333);
@@ -42,35 +42,33 @@ public:
         RCLCPP_INFO(this->get_logger(), "Configured to target Robot at %s:%d", robot_ip_.c_str(), robot_port_);
         RCLCPP_INFO(this->get_logger(), "Listening locally for telemetry on port %d", client_port_);
 
-        // 2. Setup UDP Sockets
         setup_sockets();
 
-        // 3. ROS2 Publisher & Subscribers
+        // 2. ROS2 Publishers
         odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>("/odom", 10);
-        
+        // NEW: Publisher for real-time Arm Joint Telemetry feedback
+        joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>("/joint_states", 10);
+
+        // 3. ROS2 Subscribers
         goal_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
             "/goal_pose", 10, std::bind(&KukaUdpBridge::goal_pose_callback, this, std::placeholders::_1));
             
         cmd_vel_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
             "/cmd_vel", 10, std::bind(&KukaUdpBridge::cmd_vel_callback, this, std::placeholders::_1));
 
-        // NEW: Subscribe to Joint State messages for 7-DOF LBR Arm Control
         arm_cmd_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
             "/arm_cmd", 10, std::bind(&KukaUdpBridge::arm_cmd_callback, this, std::placeholders::_1));
 
-        // TF Broadcaster for robot visualization in RViz
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
-        // 4. Start Background UDP Receive Thread
+        // 4. Background Receiver Loop
         rx_thread_active_ = true;
         rx_thread_ = std::thread(&KukaUdpBridge::receive_thread_loop, this);
 
-        // 5. Send Initial Handshake & Activation Packet
         send_to_robot("App_Start", "true");
     }
 
     ~KukaUdpBridge() {
-        // Cleanup
         send_to_robot("Set_Shutdown", "true");
         rx_thread_active_ = false;
         if (rx_thread_.joinable()) {
@@ -144,16 +142,14 @@ private:
         send_to_robot("Set_Pose", ss.str());
     }
 
-    // NEW: Callback to convert incoming ROS2 JointStates (radians) to KUKA degrees payload
     void arm_cmd_callback(const sensor_msgs::msg::JointState::SharedPtr msg) {
         if (msg->position.size() < 7) {
-            RCLCPP_WARN(this->get_logger(), "Received JointState with %size positions. Required: 7", msg->position.size());
+            RCLCPP_WARN(this->get_logger(), "Received JointState with %s positions. Required: 7", msg->position.size());
             return;
         }
 
         std::stringstream ss;
         for (size_t i = 0; i < 7; ++i) {
-            // Convert ROS2 radians to KUKA Java degrees
             double deg = msg->position[i] * (180.0 / M_PI);
             ss << deg;
             if (i < 6) ss << ",";
@@ -169,7 +165,7 @@ private:
 
         fcntl(sock_fd_, F_SETFL, O_NONBLOCK);
 
-        RCLCPP_INFO(this->get_logger(), "UDP Receive Thread spawned. Listening for status messages...");
+        RCLCPP_INFO(this->get_logger(), "UDP Receive Thread listening for status messages...");
 
         while (rx_thread_active_ && rclcpp::ok()) {
             memset(rx_buf, 0, sizeof(rx_buf));
@@ -187,6 +183,7 @@ private:
     }
 
     void parse_and_publish_telemetry(const std::string& msg) {
+        // Expected structure: Timestamp;ErrorCode;Counter;BasePosePayload;ArmPosePayload
         std::vector<std::string> parts;
         std::stringstream ss(msg);
         std::string item;
@@ -197,49 +194,78 @@ private:
         if (parts.size() < 4) return;
 
         try {
-            std::vector<double> pose;
+            // -------------------------------------------------------------
+            // 1. Process Base Telemetry (X, Y, Alpha) -> Odometry & TF
+            // -------------------------------------------------------------
+            std::vector<double> base_pose;
             std::stringstream pose_ss(parts[3]);
             std::string val;
             while (std::getline(pose_ss, val, ',')) {
-                pose.push_back(std::stod(val));
+                base_pose.push_back(std::stod(val));
             }
 
-            if (pose.size() < 3) return;
+            if (base_pose.size() >= 3) {
+                double x_m = base_pose[0] / 1000.0;
+                double y_m = base_pose[1] / 1000.0;
+                double yaw_rad = MathToRadians(base_pose[2]);
 
-            double x_m = pose[0] / 1000.0;
-            double y_m = pose[1] / 1000.0;
-            double yaw_rad = MathToRadians(pose[2]);
+                auto odom_msg = nav_msgs::msg::Odometry();
+                odom_msg.header.stamp = this->now();
+                odom_msg.header.frame_id = "odom";
+                odom_msg.child_frame_id = "base_footprint";
 
-            auto odom_msg = nav_msgs::msg::Odometry();
-            odom_msg.header.stamp = this->now();
-            odom_msg.header.frame_id = "odom";
-            odom_msg.child_frame_id = "base_footprint";
+                odom_msg.pose.pose.position.x = x_m;
+                odom_msg.pose.pose.position.y = y_m;
+                odom_msg.pose.pose.position.z = 0.0;
 
-            odom_msg.pose.pose.position.x = x_m;
-            odom_msg.pose.pose.position.y = y_m;
-            odom_msg.pose.pose.position.z = 0.0;
+                tf2::Quaternion q;
+                q.setRPY(0, 0, yaw_rad);
+                odom_msg.pose.pose.orientation.x = q.x();
+                odom_msg.pose.pose.orientation.y = q.y();
+                odom_msg.pose.pose.orientation.z = q.z();
+                odom_msg.pose.pose.orientation.w = q.w();
 
-            tf2::Quaternion q;
-            q.setRPY(0, 0, yaw_rad);
-            odom_msg.pose.pose.orientation.x = q.x();
-            odom_msg.pose.pose.orientation.y = q.y();
-            odom_msg.pose.pose.orientation.z = q.z();
-            odom_msg.pose.pose.orientation.w = q.w();
+                odom_pub_->publish(odom_msg);
 
-            odom_pub_->publish(odom_msg);
+                geometry_msgs::msg::TransformStamped tf_msg;
+                tf_msg.header = odom_msg.header;
+                tf_msg.child_frame_id = odom_msg.child_frame_id;
+                tf_msg.transform.translation.x = x_m;
+                tf_msg.transform.translation.y = y_m;
+                tf_msg.transform.translation.z = 0.0;
+                tf_msg.transform.rotation = odom_msg.pose.pose.orientation;
 
-            geometry_msgs::msg::TransformStamped tf_msg;
-            tf_msg.header = odom_msg.header;
-            tf_msg.child_frame_id = odom_msg.child_frame_id;
-            tf_msg.transform.translation.x = x_m;
-            tf_msg.transform.translation.y = y_m;
-            tf_msg.transform.translation.z = 0.0;
-            tf_msg.transform.rotation = odom_msg.pose.pose.orientation;
+                tf_broadcaster_->sendTransform(tf_msg);
+            }
 
-            tf_broadcaster_->sendTransform(tf_msg);
+            // -------------------------------------------------------------
+            // 2. Process Arm Telemetry (A1...A7) -> JointStates
+            // -------------------------------------------------------------
+            if (parts.size() >= 5 && !parts[4].empty()) {
+                std::vector<double> joint_angles_deg;
+                std::stringstream arm_ss(parts[4]);
+                while (std::getline(arm_ss, val, ',')) {
+                    joint_angles_deg.push_back(std::stod(val));
+                }
+
+                if (joint_angles_deg.size() == 7) {
+                    auto joint_msg = sensor_msgs::msg::JointState();
+                    joint_msg.header.stamp = this->now();
+                    joint_msg.name = {
+                        "lbr_joint_1", "lbr_joint_2", "lbr_joint_3", 
+                        "lbr_joint_4", "lbr_joint_5", "lbr_joint_6", "lbr_joint_7"
+                    };
+
+                    for (double deg : joint_angles_deg) {
+                        joint_msg.position.push_back(MathToRadians(deg));
+                    }
+
+                    joint_state_pub_->publish(joint_msg);
+                }
+            }
 
         } catch (const std::exception& e) {
-            RCLCPP_ERROR(this->get_logger(), "Failed to parse telemetry: %s", e.what());
+            RCLCPP_ERROR(this->get_logger(), "Failed to parse telemetry packet: %s", e.what());
         }
     }
 
@@ -257,9 +283,10 @@ private:
 
     // ROS2 Elements
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_; // NEW
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pose_sub_;
-    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr arm_cmd_sub_; // NEW
+    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr arm_cmd_sub_;
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
     // Multithreading

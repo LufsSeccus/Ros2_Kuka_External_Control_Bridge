@@ -1,3 +1,5 @@
+package application;
+
 import javax.inject.Inject;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
@@ -247,8 +249,24 @@ public class UDP_bridge extends RoboticsAPIApplication {
             long currentTime = System.currentTimeMillis();
             txCounter++;
 
-            String posePayload = String.format("%.3f,%.3f,%.3f", kmpPose.x, kmpPose.y, kmpPose.alpha);
-            String stateMsg = String.format("%d;0;%d;%s", currentTime, txCounter, posePayload);
+            // 1. KMP Base Pose Payload (X, Y, Alpha)
+            String posePayload = String.format(java.util.Locale.US, "%.3f,%.3f,%.3f", kmpPose.x, kmpPose.y, kmpPose.alpha);
+
+            // 2. Read LBR Arm Joint Positions (Returns values in radians, converted to degrees)
+            JointPosition currentJoints = lbr.getCurrentJointPosition();
+            StringBuilder armPayloadBuilder = new StringBuilder();
+            for (int i = 0; i < 7; i++) {
+                double deg = Math.toDegrees(currentJoints.get(i));
+                armPayloadBuilder.append(String.format(java.util.Locale.US, "%.2f", deg));
+                if (i < 6) {
+                    armPayloadBuilder.append(",");
+                }
+            }
+            String armPayload = armPayloadBuilder.toString();
+
+            // 3. Format complete packet: Timestamp;ErrorCode;Counter;BasePose;ArmPose
+            String stateMsg = String.format(java.util.Locale.US, "%d;0;%d;%s;%s", 
+                    currentTime, txCounter, posePayload, armPayload);
 
             byte[] data = stateMsg.getBytes("UTF-8");
             DatagramPacket packet = new DatagramPacket(data, data.length, ros2Address, PORT_CLIENT);

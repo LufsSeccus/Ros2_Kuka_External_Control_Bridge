@@ -233,8 +233,39 @@ public class UDP_bridge extends RoboticsAPIApplication {
     private void executeArmMotion(double j1, double j2, double j3, double j4, double j5, double j6, double j7) {
         // Preempt active arm motion if still running
         if (activeArmMotionContainer != null && !activeArmMotionContainer.isFinished()) {
+            logger.info("[Set_Arm] Preempting active arm motion for new command.");
             activeArmMotionContainer.cancel();
         }
+        try {
+        // 2. Fetch current joint positions for comparison
+        JointPosition currentJoints = lbr.getCurrentJointPosition();
+        
+        String currentPosStr = String.format(java.util.Locale.US,
+            "Current Pos (deg) -> J1: %.2f | J2: %.2f | J3: %.2f | J4: %.2f | J5: %.2f | J6: %.2f | J7: %.2f",
+            Math.toDegrees(currentJoints.get(0)),
+            Math.toDegrees(currentJoints.get(1)),
+            Math.toDegrees(currentJoints.get(2)),
+            Math.toDegrees(currentJoints.get(3)),
+            Math.toDegrees(currentJoints.get(4)),
+            Math.toDegrees(currentJoints.get(5)),
+            Math.toDegrees(currentJoints.get(6))
+        );
+
+        // 3. Format target joint positions in degrees
+        String targetPosStr = String.format(java.util.Locale.US,
+            "Target  Pos (deg) -> J1: %.2f | J2: %.2f | J3: %.2f | J4: %.2f | J5: %.2f | J6: %.2f | J7: %.2f",
+            Math.toDegrees(j1), Math.toDegrees(j2), Math.toDegrees(j3),
+            Math.toDegrees(j4), Math.toDegrees(j5), Math.toDegrees(j6), Math.toDegrees(j7)
+        );
+
+        // 4. Output structured logs to smartPAD Task Logger
+        logger.info("=== [LBR Arm Motion Triggered] ===");
+        logger.info(currentPosStr);
+        logger.info(targetPosStr);
+
+    } catch (Exception e) {
+        logger.warn("[Set_Arm] Could not read current position for logging: " + e.getMessage());
+    }
 
         JointPosition targetJoints = new JointPosition(j1, j2, j3, j4, j5, j6, j7);
         PTP ptpMotion = new PTP(targetJoints);

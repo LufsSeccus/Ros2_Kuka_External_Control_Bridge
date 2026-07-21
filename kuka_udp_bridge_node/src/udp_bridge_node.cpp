@@ -6,6 +6,7 @@
 #include <sstream>
 #include <vector>
 #include <iostream>
+#include <cmath>
 
 // Linux Socket Headers
 #include <sys/socket.h>
@@ -22,13 +23,14 @@
 #include "tf2_ros/transform_broadcaster.h"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "tf2/LinearMath/Matrix3x3.h"
+#include "sensor_msgs/msg/joint_state.hpp" // Added for LBR Arm Control
 
 using namespace std::chrono_literals;
 
 class KukaUdpBridge : public rclcpp::Node {
 public:
     KukaUdpBridge() : Node("kuka_udp_bridge"), tx_counter_(0) {
-        // 1. Declare ROS2 Parameters (Allows changing IP without recompiling!)
+        // 1. Declare ROS2 Parameters
         this->declare_parameter<std::string>("robot_ip", "172.31.1.147");
         this->declare_parameter<int>("robot_port", 30300);
         this->declare_parameter<int>("client_port", 30333);
@@ -43,22 +45,27 @@ public:
         // 2. Setup UDP Sockets
         setup_sockets();
 
-        // 3. ROS2 Publisher & Subscriber
+        // 3. ROS2 Publisher & Subscribers
         odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>("/odom", 10);
+        
         goal_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-        "/goal_pose", 10, std::bind(&KukaUdpBridge::goal_pose_callback, this, std::placeholders::_1));
+            "/goal_pose", 10, std::bind(&KukaUdpBridge::goal_pose_callback, this, std::placeholders::_1));
+            
         cmd_vel_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
             "/cmd_vel", 10, std::bind(&KukaUdpBridge::cmd_vel_callback, this, std::placeholders::_1));
+
+        // NEW: Subscribe to Joint State messages for 7-DOF LBR Arm Control
+        arm_cmd_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
+            "/arm_cmd", 10, std::bind(&KukaUdpBridge::arm_cmd_callback, this, std::placeholders::_1));
 
         // TF Broadcaster for robot visualization in RViz
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
-        // 4. Start the Background UDP Receive Thread
+        // 4. Start Background UDP Receive Thread
         rx_thread_active_ = true;
         rx_thread_ = std::thread(&KukaUdpBridge::receive_thread_loop, this);
 
-        // 5. Send Initial Handshake & Activation Packet to Robot
-        // This registers our dynamic IP/Port with the robot and starts the loop!
+        // 5. Send Initial Handshake & Activation Packet
         send_to_robot("App_Start", "true");
     }
 
@@ -76,18 +83,16 @@ public:
 
 private:
     void setup_sockets() {
-        // Create UDP Socket
         sock_fd_ = socket(AF_INET, SOCK_DGRAM, 0);
         if (sock_fd_ < 0) {
             RCLCPP_FATAL(this->get_logger(), "Failed to create socket!");
             throw std::runtime_error("Socket creation failed");
         }
 
-        // Bind locally to client_port (30333) so we receive incoming telemetry packets
         struct sockaddr_in local_addr;
         memset(&local_addr, 0, sizeof(local_addr));
         local_addr.sin_family = AF_INET;
-        local_addr.sin_addr.s_addr = INADDR_ANY; // Listen on any interface
+        local_addr.sin_addr.s_addr = INADDR_ANY;
         local_addr.sin_port = htons(client_port_);
 
         if (bind(sock_fd_, (struct sockaddr *)&local_addr, sizeof(local_addr)) < 0) {
@@ -95,7 +100,6 @@ private:
             throw std::runtime_error("Socket bind failed");
         }
 
-        // Configure Destination Address (The Robot)
         memset(&robot_addr_, 0, sizeof(robot_addr_));
         robot_addr_.sin_family = AF_INET;
         robot_addr_.sin_port = htons(robot_port_);
@@ -107,7 +111,6 @@ private:
         auto now = std::chrono::system_clock::now();
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
 
-        // Format packet: Timestamp;Counter;Command;Value
         std::stringstream ss;
         ss << ms << ";" << tx_counter_ << ";" << command << ";" << value;
         std::string payload = ss.str();
@@ -117,20 +120,15 @@ private:
     }
 
     void cmd_vel_callback(const geometry_msgs::msg::Twist::SharedPtr msg) {
-        // Parse Twist to vx, vy, omega (Translating m/s to KUKA's expected m/s and rad/s)
         std::stringstream ss;
         ss << msg->linear.x << "," << msg->linear.y << "," << msg->angular.z;
-        
-        // Dispatch over UDP
         send_to_robot("Set_Vel", ss.str());
     }
 
     void goal_pose_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
-        // Convert Pose to KUKA's expected format: X,Y,Alpha (Alpha in degrees)
-        double x_mm = msg->pose.position.x * 1000.0; // Convert meters to millimeters
+        double x_mm = msg->pose.position.x * 1000.0;
         double y_mm = msg->pose.position.y * 1000.0;
 
-        // Extract yaw from quaternion
         tf2::Quaternion q(
             msg->pose.orientation.x,
             msg->pose.orientation.y,
@@ -138,7 +136,7 @@ private:
             msg->pose.orientation.w);
         double roll, pitch, yaw;
         tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
-        double alpha_deg = yaw * (180.0 / M_PI); // Convert radians to degrees
+        double alpha_deg = yaw * (180.0 / M_PI);
 
         std::stringstream ss;
         ss << x_mm << "," << y_mm << "," << alpha_deg;
@@ -146,12 +144,29 @@ private:
         send_to_robot("Set_Pose", ss.str());
     }
 
+    // NEW: Callback to convert incoming ROS2 JointStates (radians) to KUKA degrees payload
+    void arm_cmd_callback(const sensor_msgs::msg::JointState::SharedPtr msg) {
+        if (msg->position.size() < 7) {
+            RCLCPP_WARN(this->get_logger(), "Received JointState with %size positions. Required: 7", msg->position.size());
+            return;
+        }
+
+        std::stringstream ss;
+        for (size_t i = 0; i < 7; ++i) {
+            // Convert ROS2 radians to KUKA Java degrees
+            double deg = msg->position[i] * (180.0 / M_PI);
+            ss << deg;
+            if (i < 6) ss << ",";
+        }
+
+        send_to_robot("Set_Arm", ss.str());
+    }
+
     void receive_thread_loop() {
         char rx_buf[1024];
         struct sockaddr_in sender_addr;
         socklen_t sender_len = sizeof(sender_addr);
 
-        // Set socket to non-blocking so the thread can shut down cleanly if we close the node
         fcntl(sock_fd_, F_SETFL, O_NONBLOCK);
 
         RCLCPP_INFO(this->get_logger(), "UDP Receive Thread spawned. Listening for status messages...");
@@ -166,14 +181,12 @@ private:
                 std::string msg(rx_buf);
                 parse_and_publish_telemetry(msg);
             } else {
-                // Sleep slightly to prevent high CPU load on empty non-blocking loops
                 std::this_thread::sleep_for(2ms);
             }
         }
     }
 
     void parse_and_publish_telemetry(const std::string& msg) {
-        // Incoming Format: Timestamp;ErrorCode;Counter;X,Y,Alpha
         std::vector<std::string> parts;
         std::stringstream ss(msg);
         std::string item;
@@ -184,7 +197,6 @@ private:
         if (parts.size() < 4) return;
 
         try {
-            // Parse coordinate payload (X, Y, Alpha)
             std::vector<double> pose;
             std::stringstream pose_ss(parts[3]);
             std::string val;
@@ -194,24 +206,19 @@ private:
 
             if (pose.size() < 3) return;
 
-            // KUKA coordinates are usually tracked in millimeters (from your math accumulator)
-            // Convert to meters for standard ROS2 conventions
             double x_m = pose[0] / 1000.0;
             double y_m = pose[1] / 1000.0;
-            double yaw_rad = MathToRadians(pose[2]); // Convert alpha degrees to rads
+            double yaw_rad = MathToRadians(pose[2]);
 
-            // Publish Odometry Message
             auto odom_msg = nav_msgs::msg::Odometry();
             odom_msg.header.stamp = this->now();
             odom_msg.header.frame_id = "odom";
             odom_msg.child_frame_id = "base_footprint";
 
-            // Pose Position
             odom_msg.pose.pose.position.x = x_m;
             odom_msg.pose.pose.position.y = y_m;
             odom_msg.pose.pose.position.z = 0.0;
 
-            // Pose Orientation (Euler Yaw -> Quaternion)
             tf2::Quaternion q;
             q.setRPY(0, 0, yaw_rad);
             odom_msg.pose.pose.orientation.x = q.x();
@@ -221,7 +228,6 @@ private:
 
             odom_pub_->publish(odom_msg);
 
-            // Broadcast TF Transform (Required for RViz mapping and visualization)
             geometry_msgs::msg::TransformStamped tf_msg;
             tf_msg.header = odom_msg.header;
             tf_msg.child_frame_id = odom_msg.child_frame_id;
@@ -252,8 +258,9 @@ private:
     // ROS2 Elements
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
-    std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pose_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr arm_cmd_sub_; // NEW
+    std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
     // Multithreading
     std::thread rx_thread_;

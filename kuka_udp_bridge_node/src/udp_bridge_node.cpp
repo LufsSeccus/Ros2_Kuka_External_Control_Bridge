@@ -155,7 +155,7 @@ private:
         fcntl(sock_fd_, F_SETFL, O_NONBLOCK);
 
         RCLCPP_INFO(this->get_logger(), "UDP Receive Thread spawned. Listening for status messages...");
-
+        
         while (rx_thread_active_ && rclcpp::ok()) {
             memset(rx_buf, 0, sizeof(rx_buf));
             int bytes_received = recvfrom(sock_fd_, rx_buf, sizeof(rx_buf) - 1, 0,
@@ -164,6 +164,15 @@ private:
             if (bytes_received > 0) {
                 rx_buf[bytes_received] = '\0';
                 std::string msg(rx_buf);
+                // --- Continuous Telemetry Stream Logging ---
+            // Logs once per second (1000ms) without slowing down packet processing
+                RCLCPP_INFO_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                1000, 
+                "[KUKA RX Stream] Raw telemetry: %s",
+                msg.c_str()
+                );
                 parse_and_publish_telemetry(msg);
             } else {
                 // Sleep slightly to prevent high CPU load on empty non-blocking loops

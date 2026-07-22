@@ -29,7 +29,7 @@ class KukaUdpBridge : public rclcpp::Node {
 public:
     KukaUdpBridge() : Node("kuka_udp_bridge"), tx_counter_(0) {
         // 1. Declare ROS2 Parameters (Allows changing IP without recompiling!)
-        this->declare_parameter<std::string>("robot_ip", "172.31.1.147");
+        this->declare_parameter<std::string>("robot_ip", "172.31.1.10");
         this->declare_parameter<int>("robot_port", 30300);
         this->declare_parameter<int>("client_port", 30333);
 

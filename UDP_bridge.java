@@ -190,20 +190,33 @@ public class UDP_bridge extends RoboticsAPIApplication {
             // ==========================================================
             // 3. LBR ARM JOINT CONTROL MODE (7 Joint Angles in Degrees)
             // ==========================================================
-            else if (command.equalsIgnoreCase("Set_Arm")) {
+            else if (command.equalsIgnoreCase("Set_Arm_Joint")) {
                 String[] joints = value.split(",");
                 if (joints.length == 7) {
-                    double j1 = Math.toRadians(Double.parseDouble(joints[0]));
-                    double j2 = Math.toRadians(Double.parseDouble(joints[1]));
-                    double j3 = Math.toRadians(Double.parseDouble(joints[2]));
-                    double j4 = Math.toRadians(Double.parseDouble(joints[3]));
-                    double j5 = Math.toRadians(Double.parseDouble(joints[4]));
-                    double j6 = Math.toRadians(Double.parseDouble(joints[5]));
-                    double j7 = Math.toRadians(Double.parseDouble(joints[6]));
+                    executeArmJointMotion(
+                        Math.toRadians(Double.parseDouble(joints[0])),
+                        Math.toRadians(Double.parseDouble(joints[1])),
+                        Math.toRadians(Double.parseDouble(joints[2])),
+                        Math.toRadians(Double.parseDouble(joints[3])),
+                        Math.toRadians(Double.parseDouble(joints[4])),
+                        Math.toRadians(Double.parseDouble(joints[5])),
+                        Math.toRadians(Double.parseDouble(joints[6]))
+                    );
+                }
+            }
 
-                    executeArmMotion(j1, j2, j3, j4, j5, j6, j7);
-                } else {
-                    logger.warn("Set_Arm command requires exactly 7 joint values. Received: " + joints.length);
+            // 4. LBR ARM CARTESIAN END-EFFECTOR MODE (x, y, z [m], a, b, c [rad])
+            else if (command.equalsIgnoreCase("Set_Arm_End_Effector")) {
+                String[] pose = value.split(",");
+                if (pose.length == 6) {
+                    double x_mm = Double.parseDouble(pose[0]) * 1000.0; // convert meters to mm
+                    double y_mm = Double.parseDouble(pose[1]) * 1000.0;
+                    double z_mm = Double.parseDouble(pose[2]) * 1000.0;
+                    double a_rad = Double.parseDouble(pose[3]); // KUKA A (Z rotation)
+                    double b_rad = Double.parseDouble(pose[4]); // KUKA B (Y rotation)
+                    double c_rad = Double.parseDouble(pose[5]); // KUKA C (X rotation)
+
+                    executeCartesianArmMotion(x_mm, y_mm, z_mm, a_rad, b_rad, c_rad);
                 }
             }
         } catch (Exception e) {
@@ -269,6 +282,51 @@ public class UDP_bridge extends RoboticsAPIApplication {
 
         JointPosition targetJoints = new JointPosition(j1, j2, j3, j4, j5, j6, j7);
         PTP ptpMotion = new PTP(targetJoints);
+
+        // Non-blocking LBR PTP motion
+        activeArmMotionContainer = lbr.moveAsync(ptpMotion);
+    }
+
+    private void executeCartesianArmMotion(double x_mm, double y_mm, double z_mm, double a_rad, double b_rad, double c_rad) {
+        // Preempt active arm motion if still running
+        if (activeArmMotionContainer != null && !activeArmMotionContainer.isFinished()) {
+            logger.info("[Set_Arm_EE] Preempting active arm motion for new command.");
+            activeArmMotionContainer.cancel();
+        }
+
+        try {
+            // Fetch current Cartesian position for comparison
+            Frame currentFrame = lbr.getCurrentCartesianPosition(lbr.getFlange());
+
+            String currentCartStr = String.format(Locale.US,
+                "Current EE -> X: %.2f mm | Y: %.2f mm | Z: %.2f mm | A: %.2f deg | B: %.2f deg | C: %.2f deg",
+                currentFrame.getX(),
+                currentFrame.getY(),
+                currentFrame.getZ(),
+                Math.toDegrees(currentFrame.getAlphaRad()),
+                Math.toDegrees(currentFrame.getBetaRad()),
+                Math.toDegrees(currentFrame.getGammaRad())
+            );
+
+            String targetCartStr = String.format(Locale.US,
+                "Target  EE -> X: %.2f mm | Y: %.2f mm | Z: %.2f mm | A: %.2f deg | B: %.2f deg | C: %.2f deg",
+                x_mm, y_mm, z_mm,
+                Math.toDegrees(a_rad),
+                Math.toDegrees(b_rad),
+                Math.toDegrees(c_rad)
+            );
+
+            logger.info("=== [LBR Arm Cartesian Motion Triggered] ===");
+            logger.info(currentCartStr);
+            logger.info(targetCartStr);
+
+        } catch (Exception e) {
+            logger.warn("[Set_Arm_EE] Could not read current Cartesian frame for logging: " + e.getMessage());
+        }
+
+        // Build target Frame relative to LBR Root Frame
+        Frame targetFrame = new Frame(lbr.getRootFrame(), x_mm, y_mm, z_mm, a_rad, b_rad, c_rad);
+        PTP ptpMotion = new PTP(targetFrame);
 
         // Non-blocking LBR PTP motion
         activeArmMotionContainer = lbr.moveAsync(ptpMotion);

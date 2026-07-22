@@ -5,7 +5,10 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.SocketTimeoutException;
+import java.util.Locale;
 
+import com.kuka.geometry.Frame;
+import static com.kuka.roboticsAPI.motionModel.BasicMotions.ptp;
 import com.kuka.roboticsAPI.applicationModel.RoboticsAPIApplication;
 import com.kuka.roboticsAPI.deviceModel.JointPosition;
 import com.kuka.roboticsAPI.deviceModel.LBR;
@@ -243,7 +246,7 @@ public class UDP_bridge extends RoboticsAPIApplication {
         activePlatformMotionContainer = kmp.moveAsync(relMotion);
     }
 
-    private void executeArmMotion(double j1, double j2, double j3, double j4, double j5, double j6, double j7) {
+    private void executeArmJointMotion(double j1, double j2, double j3, double j4, double j5, double j6, double j7) {
         // Preempt active arm motion if still running
         if (activeArmMotionContainer != null && !activeArmMotionContainer.isFinished()) {
             logger.info("[Set_Arm] Preempting active arm motion for new command.");
@@ -296,7 +299,7 @@ public class UDP_bridge extends RoboticsAPIApplication {
 
         try {
             // Fetch current Cartesian position for comparison
-            Frame currentFrame = lbr.getCurrentCartesianPosition(lbr.getFlange());
+            com.kuka.roboticsAPI.geometricModel.Frame currentFrame = lbr.getCurrentCartesianPosition(lbr.getFlange());
 
             String currentCartStr = String.format(Locale.US,
                 "Current EE -> X: %.2f mm | Y: %.2f mm | Z: %.2f mm | A: %.2f deg | B: %.2f deg | C: %.2f deg",
@@ -324,12 +327,12 @@ public class UDP_bridge extends RoboticsAPIApplication {
             logger.warn("[Set_Arm_EE] Could not read current Cartesian frame for logging: " + e.getMessage());
         }
 
-        // Build target Frame relative to LBR Root Frame
-        Frame targetFrame = new Frame(lbr.getRootFrame(), x_mm, y_mm, z_mm, a_rad, b_rad, c_rad);
-        PTP ptpMotion = new PTP(targetFrame);
+     // Build target Frame relative to LBR Root Frame
+        com.kuka.roboticsAPI.geometricModel.Frame targetFrame = 
+            new com.kuka.roboticsAPI.geometricModel.Frame(lbr.getRootFrame(), x_mm, y_mm, z_mm, a_rad, b_rad, c_rad);
 
-        // Non-blocking LBR PTP motion
-        activeArmMotionContainer = lbr.moveAsync(ptpMotion);
+        // Non-blocking LBR PTP motion using BasicMotions helper
+        activeArmMotionContainer = lbr.moveAsync(com.kuka.roboticsAPI.motionModel.BasicMotions.ptp(targetFrame));
     }
 
     private void sendNativeTelemetry() {

@@ -162,7 +162,7 @@ private:
 
     void arm_joint_callback(const sensor_msgs::msg::JointState::SharedPtr msg) {
         if (msg->position.size() < 7) {
-            RCLCPP_WARN(this->get_logger(), "[TX Arm Joint] Expected 7 joint positions, got %size()", msg->position.size());
+            RCLCPP_WARN(this->get_logger(), "[TX Arm Joint] Expected 7 joint positions, got %ld", msg->position.size());
             return;
         }
 

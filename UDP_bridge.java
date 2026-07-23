@@ -41,6 +41,7 @@ public class UDP_bridge extends RoboticsAPIApplication {
     private long lastVelCommandTime = 0;
 
     // Non-blocking motion containers
+    private Thread activePlatformThread = null;
     private ICommandContainer activePlatformMotionContainer = null;
     private IMotionContainer activeArmMotionContainer = null;
 
@@ -163,8 +164,8 @@ public class UDP_bridge extends RoboticsAPIApplication {
 
                 if (dt <= 0 || dt > 0.5) dt = 0.05;
 
-                double dx = vx * 1000.0 * dt; // mm
-                double dy = vy * 1000.0 * dt; // mm
+                double dx = vx * dt; // mm
+                double dy = vy * dt; // mm
                 double dAlphaDegrees = Math.toDegrees(omega * dt);
 
                 executeRelativePlatformMotion(dx, dy, dAlphaDegrees);
@@ -229,21 +230,27 @@ public class UDP_bridge extends RoboticsAPIApplication {
 
     private void executeRelativePlatformMotion(double dx, double dy, double dAlphaDegrees) {
         // Preempt any active platform motion if still running
-        if (activePlatformMotionContainer != null && !activePlatformMotionContainer.isFinished()) {
-            activePlatformMotionContainer.cancel();
+        if (activePlatformThread != null && activePlatformThread.isAlive()) {
+        activePlatformThread.interrupt(); // This aborts the blocking KUKA move()
         }
-
         // Update local open-loop pose tracking
         kmpPose.update(dx, dy, dAlphaDegrees);
 
-        double dx_meters = dx / 1000.0;
-        double dy_meters = dy / 1000.0;
         double dAlpha_rad = Math.toRadians(dAlphaDegrees);
 
-        MobilePlatformRelativeMotion relMotion = new MobilePlatformRelativeMotion(dx_meters, dy_meters, dAlpha_rad);
+        MobilePlatformRelativeMotion relMotion = new MobilePlatformRelativeMotion(dx, dy, dAlpha_rad);
         
         // Non-blocking platform command
-        activePlatformMotionContainer = kmp.moveAsync(relMotion);
+        activePlatformThread = new Thread(new Runnable() {
+        @Override
+        public void run() {
+            try {
+                kmp.move(relMotion);
+            } catch (Exception e) {
+                // Thread interrupted or motion preempted, safely ignored
+            }
+        }
+    }
     }
 
     private void executeArmJointMotion(double j1, double j2, double j3, double j4, double j5, double j6, double j7) {
@@ -373,9 +380,9 @@ public class UDP_bridge extends RoboticsAPIApplication {
         isRunning = false;
         isApplicationActive = false;
 
-        if (activePlatformMotionContainer != null && !activePlatformMotionContainer.isFinished()) {
-            activePlatformMotionContainer.cancel();
-        }
+        if (activePlatformThread != null && activePlatformThread.isAlive()) {
+        activePlatformThread.interrupt();
+    }
         if (activeArmMotionContainer != null && !activeArmMotionContainer.isFinished()) {
             activeArmMotionContainer.cancel();
         }

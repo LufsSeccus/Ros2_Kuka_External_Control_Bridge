@@ -238,7 +238,7 @@ public class UDP_bridge extends RoboticsAPIApplication {
 
         double dAlpha_rad = Math.toRadians(dAlphaDegrees);
 
-        MobilePlatformRelativeMotion relMotion = new MobilePlatformRelativeMotion(dx, dy, dAlpha_rad);
+        final MobilePlatformRelativeMotion relMotion = new MobilePlatformRelativeMotion(dx, dy, dAlpha_rad);
         
         // Non-blocking platform command
         activePlatformThread = new Thread(new Runnable() {

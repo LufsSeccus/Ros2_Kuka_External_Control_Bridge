@@ -6,6 +6,9 @@
 #include <sstream>
 #include <vector>
 #include <iostream>
+#include <fstream>   // Added for file I/O
+#include <iomanip>   // Added for time formatting
+#include <algorithm> // Added for std::replace
 
 // Linux Socket Headers
 #include <sys/socket.h>
@@ -83,6 +86,11 @@ public:
         }
         if (sock_fd_ >= 0) {
             close(sock_fd_);
+        }
+        // Safely close the logger file on shutdown
+        if (telemetry_log_file_.is_open()) {
+            telemetry_log_file_.close();
+            RCLCPP_INFO(this->get_logger(), "[KUKA UDP Bridge] Telemetry log file saved and closed.");
         }
     }
 
@@ -210,6 +218,20 @@ private:
             roll_rad * (180.0 / M_PI), pitch_rad * (180.0 / M_PI), yaw_rad * (180.0 / M_PI));
     }
 
+    std::string get_log_filename() {
+        auto now = std::chrono::system_clock::now();
+        std::time_t now_c = std::chrono::system_clock::to_time_t(now);
+        std::tm parts;
+        localtime_r(&now_c, &parts); // Safe parsing for Linux environments
+
+        std::ostringstream oss;
+        // Format: logger_bridge_file_HH-MM_DD-MM-YYYY.csv
+        oss << "logger_bridge_file_" 
+            << std::put_time(&parts, "%H-%M_%d-%m-%Y") 
+            << ".csv";
+        return oss.str();
+    }
+
     // --- Telemetry RX Processing Loop ---
 
     void receive_thread_loop() {
@@ -228,6 +250,33 @@ private:
             if (bytes_received > 0) {
                 rx_buf[bytes_received] = '\0';
                 std::string msg(rx_buf);
+                // --- 1. INITIALIZE LOGGER FILE ON FIRST MESSAGE ---
+                if (!is_logging_started_) {
+                    std::string filename = get_log_filename();
+                    telemetry_log_file_.open(filename, std::ios::out | std::ios::app);
+                    
+                    if (telemetry_log_file_.is_open()) {
+                        // Write the CSV Table Header
+                        telemetry_log_file_ << "Timestamp,ErrorCode,Counter,"
+                                            << "KMP_X,KMP_Y,KMP_Alpha,"
+                                            << "Arm_J1,Arm_J2,Arm_J3,Arm_J4,Arm_J5,Arm_J6,Arm_J7\n";
+                        
+                        is_logging_started_ = true;
+                        RCLCPP_INFO(this->get_logger(), "[KUKA UDP Bridge] Started telemetry logging: %s", filename.c_str());
+                    } else {
+                        RCLCPP_ERROR(this->get_logger(), "[KUKA UDP Bridge] Failed to create telemetry log file!");
+                    }
+                }
+
+                // --- 2. APPEND TELEMETRY TO LOGGER ---
+                if (is_logging_started_ && telemetry_log_file_.is_open()) {
+                    std::string csv_line = msg;
+                    // Replace the Java ';' delimiters with ',' for the CSV table
+                    std::replace(csv_line.begin(), csv_line.end(), ';', ',');
+                    
+                    telemetry_log_file_ << csv_line << "\n";
+                    telemetry_log_file_.flush(); // Ensure it writes to disk immediately
+                }
 
                 RCLCPP_INFO_THROTTLE(
                     this->get_logger(), *this->get_clock(), 1000,
@@ -334,6 +383,10 @@ private:
     int robot_port_;
     int client_port_;
     long tx_counter_;
+
+    // File Logging Data
+    std::ofstream telemetry_log_file_;
+    bool is_logging_started_ = false;
 
     // ROS2 Interfaces
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;

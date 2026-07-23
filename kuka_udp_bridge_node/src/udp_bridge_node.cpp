@@ -226,7 +226,7 @@ private:
 
         std::ostringstream oss;
         // Format: logger_bridge_file_HH-MM_DD-MM-YYYY.csv
-        oss << "logger_bridge_file_" 
+        oss << "/kuka_log/logger_bridge_file_" 
             << std::put_time(&parts, "%H-%M_%d-%m-%Y") 
             << ".csv";
         return oss.str();
